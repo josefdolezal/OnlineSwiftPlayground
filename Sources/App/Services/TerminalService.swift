@@ -2,19 +2,31 @@ import BuildToolchainEngine
 import TSCBasic
 import Vapor
 
-public final class TerminalService {
+public actor TerminalService {
 
     private let buildToolchain: BuildToolchain = .init()
     private let workingDirectory: AbsolutePath
+
+    private var activeConnections: [WebSocket] = []
 
     init(workingDirectory: String) {
         self.workingDirectory = AbsolutePath(workingDirectory)
     }
 
-    public func connected(on webSocket: WebSocket) {
+    public func connected(on webSocket: WebSocket) async {
+        activeConnections.append(webSocket)
         webSocket.pingInterval = .seconds(30)
         webSocket.onBinary(received(on:bytes:))
         webSocket.onText(received(on:text:))
+
+        await webSocket.closed()
+        disconnect(webSocket: webSocket)
+        activeConnections.removeAll(where: { $0 === webSocket })
+    }
+
+    func shutdown() {
+        activeConnections.forEach(disconnect(webSocket:))
+        activeConnections = []
     }
 
     private func received(on webSocket: WebSocket, bytes: ByteBuffer) {
@@ -43,6 +55,22 @@ public final class TerminalService {
             break
         }
     }
+
+    private func disconnect(webSocket: WebSocket) {
+        if !webSocket.isClosed {
+            _ = webSocket.close()
+        }
+    }
+}
+
+extension WebSocket {
+    func closed() async {
+        await withCheckedContinuation { continuation in
+            onClose.whenComplete { _ in
+                continuation.resume()
+            }
+        }
+    }
 }
 
 private struct RunResult {
@@ -69,11 +97,20 @@ private enum TerminalServiceKey: StorageKey {
     typealias Value = TerminalService
 }
 
-public extension Request {
+public extension Application {
     var terminal: TerminalService {
         get {
             guard let service = storage[TerminalServiceKey.self] else {
-                let newService = TerminalService(workingDirectory: application.directory.workingDirectory)
+                let newService = TerminalService(workingDirectory: directory.workingDirectory)
+                storage.set(
+                    TerminalServiceKey.self,
+                    to: newService,
+                    onShutdown: { service in
+                        Task {
+                            await service.shutdown()
+                        }
+                    }
+                )
                 storage[TerminalServiceKey.self] = newService
                 return newService
             }

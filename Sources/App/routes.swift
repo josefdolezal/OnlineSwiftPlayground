@@ -30,8 +30,10 @@ extension Application {
             return req.fileio.streamFile(at: playgroundPath.pathString)
         }
 
-        webSocket("terminal") { req, ws in
-            req.terminal.connected(on: ws)
+
+        webSocket("terminal") { req, ws async in
+            let terminal = req.application.terminal
+            await terminal.connected(on: ws)
         }
     }
 }
